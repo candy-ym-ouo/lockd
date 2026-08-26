@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>lockd · 分布式锁控制台</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div><h1>lockd</h1><span>分布式锁控制台</span></div>
+    <div class="toolbar">
+      <label>命名空间 <input id="namespace" value="default"></label>
+      <button id="refresh">刷新</button>
+      <button id="create" class="primary">创建锁</button>
+    </div>
+  </header>
+  <main>
+    <section class="stats">
+      <article><span>锁总数</span><strong id="total">0</strong></article>
+      <article><span>持锁中</span><strong id="held">0</strong></article>
+      <article><span>等待者</span><strong id="waiters">0</strong></article>
+      <article><span>过期事件</span><strong id="expired">0</strong></article>
+    </section>
+    <div class="layout">
+      <section class="panel locks-panel">
+        <div class="panel-title"><h2>锁列表</h2><span id="connection">事件流连接中…</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>名称</th><th>状态</th><th>持有者</th><th>租约</th><th>队列</th><th></th></tr></thead>
+            <tbody id="locks"></tbody>
+          </table>
+        </div>
+        <div id="detail" class="detail empty">选择一把锁查看详情</div>
+      </section>
+      <aside class="panel events-panel">
+        <div class="panel-title"><h2>实时事件</h2><button id="clearEvents">清空</button></div>
+        <ol id="events"></ol>
+      </aside>
+    </div>
+  </main>
+  <div id="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
