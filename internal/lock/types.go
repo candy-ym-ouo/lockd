@@ -94,7 +94,6 @@ type record struct {
 	lastIdleAt    time.Time
 	deleted       bool
 	queue         waiterQueue
-	queueBuffer   []WaiterView
 	releasedToken map[string]struct{}
 }
 
@@ -110,8 +109,9 @@ func (r *record) snapshot(now time.Time) View {
 		copyTime := r.expiresAt
 		expires = &copyTime
 	}
-	r.queueBuffer = r.queue.viewsInto(r.queueBuffer[:0])
-	queue := r.queueBuffer
+	// Allocate a fresh, caller-owned slice so the returned View never aliases
+	// state that another request can mutate after the lock is released.
+	queue := r.queue.views()
 	return View{
 		FullName:    r.fullName(),
 		Namespace:   r.namespace,

@@ -16,7 +16,6 @@ type Registry struct {
 	quota      int
 	nsCounts   map[string]int
 	defaultTTL time.Duration
-	listBuffer []View
 }
 
 func NewRegistry(namespaces []string, quota int, defaultTTL time.Duration) *Registry {
@@ -127,9 +126,9 @@ func (r *Registry) List(namespace, state string) []View {
 		}
 	}
 	r.mu.RUnlock()
-	r.mu.RLock()
-	views := r.listBuffer[:0]
-	r.mu.RUnlock()
+	// Allocate a caller-owned slice; each item.snapshot also returns a private
+	// Queue slice, so the encoded response never aliases shared registry state.
+	views := make([]View, 0, len(items))
 	for _, item := range items {
 		item.mu.Lock()
 		if item.deleted {
@@ -143,9 +142,6 @@ func (r *Registry) List(namespace, state string) []View {
 		}
 	}
 	sort.Slice(views, func(i, j int) bool { return views[i].FullName < views[j].FullName })
-	r.mu.Lock()
-	r.listBuffer = views
-	r.mu.Unlock()
 	return views
 }
 func (r *Registry) allRecords() []*record {
