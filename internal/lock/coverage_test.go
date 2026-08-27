@@ -3,6 +3,7 @@ package lock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +119,76 @@ func TestRunExpirerAndAutoCleanup(t *testing.T) {
 	}
 	cancel()
 	t.Fatal("expirer did not expire and clean up lock")
+}
+
+func TestRunExpirerGracefulShutdownAcrossWorkers(t *testing.T) {
+	// Regression: with the default two scan workers, cancelling the expirer
+	// context (SIGTERM path) panicked with "sync: negative WaitGroup counter"
+	// because stopExpirerWorkers Add'd fewer entries than the goroutines it
+	// launched. The shutdown must complete cleanly for every legal worker
+	// count and cancel every outstanding waiter so no goroutine keeps poking
+	// the registry after shutdown returns.
+	for _, workers := range []int{1, 2, 3, 5} {
+		t.Run(fmt.Sprintf("workers=%d", workers), func(t *testing.T) {
+			registry := NewRegistry(nil, 100, time.Second)
+			service := NewService(registry, NewBus(), &metrics.Metrics{}, "")
+			_, err := service.Create(CreateOptions{
+				Namespace: "n", Name: "shared", Reentrant: false, DefaultTTL: 10 * time.Second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.Acquire(context.Background(), "n", "shared", AcquireOptions{Holder: "owner"}); err != nil {
+				t.Fatal(err)
+			}
+			waiterErrs := make([]chan error, 8)
+			for i := range waiterErrs {
+				waiterErrs[i] = make(chan error, 1)
+				go func(target chan error) {
+					_, err := service.Acquire(context.Background(), "n", "shared", AcquireOptions{Holder: "waiter", Wait: true})
+					target <- err
+				}(waiterErrs[i])
+			}
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				view, _ := service.Get("n", "shared")
+				if view.QueueLength == len(waiterErrs) {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if view, _ := service.Get("n", "shared"); view.QueueLength != len(waiterErrs) {
+				t.Fatalf("queue did not reach %d", len(waiterErrs))
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				service.RunExpirer(ctx, time.Millisecond, workers)
+				close(done)
+			}()
+			// Let at least one scan pass run so the expirer is mid-flight, then
+			// pull the SIGTERM lever.
+			time.Sleep(3 * time.Millisecond)
+			cancel()
+
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("expirer did not shut down within timeout (negative WaitGroup counter?)")
+			}
+			for i, errc := range waiterErrs {
+				select {
+				case err := <-errc:
+					if !errors.Is(err, context.Canceled) {
+						t.Fatalf("waiter %d not cancelled on shutdown: %v", i, err)
+					}
+				case <-time.After(time.Second):
+					t.Fatalf("waiter %d was never released by shutdown", i)
+				}
+			}
+		})
+	}
 }
 
 func TestDepthTTLAndNonReentrantValidation(t *testing.T) {

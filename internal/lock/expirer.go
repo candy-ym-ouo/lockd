@@ -27,22 +27,25 @@ func (s *Service) RunExpirer(ctx context.Context, interval time.Duration, worker
 	}
 }
 func (s *Service) stopExpirerWorkers(workers int) {
+	// FIX: register one WaitGroup entry per partition we actually launch. The
+	// previous code subtracted 1 from the partition count when it exceeded 1,
+	// so with the default two workers it Add(1)'d while two goroutines each
+	// Done()'d — a guaranteed "sync: negative WaitGroup counter" on SIGTERM.
+	// Empty partitions still launch a goroutine, so the counter must equal
+	// len(partitions) regardless of worker count.
 	partitions := s.registry.workerPartitions(workers)
-	registered := len(partitions)
-	if registered > 1 {
-		registered--
-	}
 	var wait sync.WaitGroup
-	wait.Add(registered)
+	wait.Add(len(partitions))
 	for _, partition := range partitions {
-		go func(items []*record) {
+		partition := partition
+		go func() {
 			defer wait.Done()
-			for _, item := range items {
+			for _, item := range partition {
 				item.mu.Lock()
 				item.queue.cancelAll(context.Canceled)
 				item.mu.Unlock()
 			}
-		}(partition)
+		}()
 	}
 	wait.Wait()
 }
