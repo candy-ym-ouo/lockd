@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,9 +31,20 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	retries    int
-	leases     map[string]*Lease
+	// mu guards the leases map only. It is never held across a network call
+	// (c.do) or a user callback, so those cannot block one another. Per-lease
+	// field updates (ExpiresAt/Depth) use the Lease's own mutex, so they do
+	// not contend with this lock and stay race-free even for external readers.
+	mu     sync.Mutex
+	leases map[string]*Lease
 }
 
+// Lease is a client-side view of a held lock. Its mutable fields (ExpiresAt,
+// Depth) are written by Renew/Release from background goroutines (the renewer)
+// and must be read concurrently-safe: use the Expiry/CurrentDepth accessors
+// rather than touching the fields directly. Each Lease carries its own mutex
+// (independent of the Client's map lock) so field updates never contend with
+// the lease cache and vice versa.
 type Lease struct {
 	Namespace string        `json:"namespace"`
 	Name      string        `json:"name"`
@@ -41,7 +53,40 @@ type Lease struct {
 	Depth     int           `json:"depth"`
 	ExpiresAt time.Time     `json:"expires_at"`
 	TTL       time.Duration `json:"-"`
+
+	mu sync.Mutex
 }
+
+// Expiry returns the latest known server-side expiry time, safe for concurrent
+// access while a renewer is running.
+func (l *Lease) Expiry() time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.ExpiresAt
+}
+
+// CurrentDepth returns the latest known reentrant depth, safe for concurrent
+// access while Release is running.
+func (l *Lease) CurrentDepth() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.Depth
+}
+
+// setExpiry updates ExpiresAt under the lease lock.
+func (l *Lease) setExpiry(t time.Time) {
+	l.mu.Lock()
+	l.ExpiresAt = t
+	l.mu.Unlock()
+}
+
+// setDepth updates Depth under the lease lock.
+func (l *Lease) setDepth(d int) {
+	l.mu.Lock()
+	l.Depth = d
+	l.mu.Unlock()
+}
+
 type AcquireOptions struct {
 	TTL         time.Duration
 	Wait        bool
@@ -104,7 +149,9 @@ func (c *Client) Acquire(ctx context.Context, namespace, name, holder string, op
 		Namespace: namespace, Name: name, Holder: holder, Token: response.Token,
 		Depth: response.Depth, ExpiresAt: response.ExpiresAt, TTL: ttl,
 	}
+	c.mu.Lock()
 	c.leases[lockKey(namespace, name)] = lease
+	c.mu.Unlock()
 	return lease, nil
 }
 func (c *Client) Renew(ctx context.Context, lease *Lease) error {
@@ -115,9 +162,14 @@ func (c *Client) Renew(ctx context.Context, lease *Lease) error {
 	var response struct {
 		ExpiresAt time.Time `json:"expires_at"`
 	}
+	// Network call is outside any lock so it cannot block or be blocked by
+	// map/field updates or by other goroutines' callbacks.
 	err := c.do(ctx, http.MethodPost, lockPath(lease.Namespace, lease.Name)+"/renew", body, "", &response)
 	if err == nil {
-		lease.ExpiresAt = response.ExpiresAt
+		// Field update goes through the per-lease lock (not the map lock), so a
+		// concurrent reader using Expiry() stays race-free without touching the
+		// lease cache.
+		lease.setExpiry(response.ExpiresAt)
 	}
 	return err
 }
@@ -133,9 +185,9 @@ func (c *Client) Release(ctx context.Context, lease *Lease) error {
 	if err != nil {
 		return err
 	}
-	lease.Depth = response.Depth
+	lease.setDepth(response.Depth)
 	if response.Released || response.Depth == 0 {
-		delete(c.leases, lockKey(lease.Namespace, lease.Name))
+		c.removeLease(lease.Namespace, lease.Name)
 	}
 	return nil
 }
@@ -236,7 +288,17 @@ func lockPath(namespace, name string) string {
 }
 func lockKey(namespace, name string) string { return namespace + ":" + name }
 func (c *Client) ActiveLeases() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return len(c.leases)
+}
+
+// removeLease drops a lease from the local cache. It only takes the lock for
+// the map delete — never across a network call or user callback.
+func (c *Client) removeLease(namespace, name string) {
+	c.mu.Lock()
+	delete(c.leases, lockKey(namespace, name))
+	c.mu.Unlock()
 }
 func effectiveTTL(requested time.Duration, expiresAt time.Time) time.Duration {
 	if requested > 0 {

@@ -8,7 +8,9 @@ import (
 
 func (c *Client) StartRenewer(parent context.Context, lease *Lease, onLost func(error)) context.CancelFunc {
 	ctx, cancel := context.WithCancel(parent)
+	c.mu.Lock()
 	c.leases[lockKey(lease.Namespace, lease.Name)] = lease
+	c.mu.Unlock()
 	go func() {
 		failures := 0
 		base := lease.TTL / 3
@@ -31,7 +33,10 @@ func (c *Client) StartRenewer(parent context.Context, lease *Lease, onLost func(
 			}
 			failures++
 			if failures >= 3 {
-				delete(c.leases, lockKey(lease.Namespace, lease.Name))
+				// FIX: drop the lease from the cache under the lock, then invoke
+				// the user callback outside the lock so it (and any network call
+				// it makes) cannot block or be blocked by other goroutines.
+				c.removeLease(lease.Namespace, lease.Name)
 				if onLost != nil {
 					onLost(err)
 				}

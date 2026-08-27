@@ -36,11 +36,13 @@ func (c *Client) WatchLoop(ctx context.Context, namespace, name string, callback
 			}
 			return err
 		}
+		// callback is invoked outside the lock so it (and any network request it
+		// issues) cannot block or be blocked by lease map updates elsewhere.
 		if callback != nil {
 			callback(event)
 		}
 		if event.Event == "released" || event.Event == "expired" || event.Event == "stolen" {
-			delete(c.leases, lockKey(namespace, name))
+			c.removeLease(namespace, name)
 		}
 	}
 }
