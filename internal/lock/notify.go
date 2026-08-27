@@ -3,7 +3,7 @@ package lock
 import "sync"
 
 type Bus struct {
-	mu     sync.RWMutex
+	mu     sync.Mutex
 	nextID uint64
 	subs   map[uint64]chan Event
 }
@@ -25,24 +25,30 @@ func (b *Bus) Subscribe(buffer int) (<-chan Event, func()) {
 	var once sync.Once
 	cancel := func() {
 		once.Do(func() {
+			// Remove the subscriber and close its channel under the write
+			// lock. Broadcast also holds this lock for the whole send loop,
+			// so a send and a close can never overlap on the same channel —
+			// closing is serialized either before Broadcast sees the channel
+			// (it is gone from the map) or after Broadcast has finished
+			// sending (closing an already-sent channel is a no-op for senders).
 			b.mu.Lock()
 			delete(b.subs, id)
-			b.mu.Unlock()
 			close(channel)
+			b.mu.Unlock()
 		})
 	}
 	return channel, cancel
 }
 
 func (b *Bus) Broadcast(event Event) int {
-	b.mu.RLock()
-	channels := make([]chan Event, 0, len(b.subs))
-	for _, channel := range b.subs {
-		channels = append(channels, channel)
-	}
-	b.mu.RUnlock()
+	// Hold the write lock across the whole send loop. Sends are non-blocking
+	// (the default clause skips a full buffer), so a slow subscriber cannot
+	// stall the bus, and because cancel() takes the same lock to close a
+	// channel, a send and a close can never race on the same channel.
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	delivered := 0
-	for _, channel := range channels {
+	for _, channel := range b.subs {
 		select {
 		case channel <- event:
 			delivered++
