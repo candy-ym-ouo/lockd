@@ -44,7 +44,14 @@ func recoverPanics(log *logger.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				log.Error("http_panic", map[string]any{"error": recovered, "stack": string(debug.Stack())})
+				// Log the panic best-effort: the logger itself (or its writer)
+				// may be what failed, so guard a second panic here. If logging
+				// panics again we must still deliver an error response to the
+				// client rather than tearing down the process.
+				func() {
+					defer func() { _ = recover() }()
+					log.Error("http_panic", map[string]any{"error": recovered, "stack": string(debug.Stack())})
+				}()
 				writeError(w, &internalError{})
 			}
 		}()

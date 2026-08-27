@@ -14,14 +14,14 @@ type Logger struct {
 	out   io.Writer
 	level int
 }
-type disabledWriter struct {
-	target io.Writer
-}
 
-func (w *disabledWriter) Write(data []byte) (int, error) { return w.target.Write(data) }
+// DisabledWriter returns a sink that discards all log output safely. It is
+// used when the service is started with -disable-logging so request handling
+// can still flow through code paths that call the logger. The returned writer
+// is a non-nil io.Writer, so logger.New's nil guard does not replace it, and
+// every Write call is a no-op rather than a nil-pointer dereference.
 func DisabledWriter() io.Writer {
-	var writer *disabledWriter
-	return writer
+	return io.Discard
 }
 
 var levels = map[string]int{"debug": 0, "info": 1, "warn": 2, "error": 3}
@@ -38,6 +38,13 @@ func New(out io.Writer, level string) *Logger {
 }
 
 func (l *Logger) Log(level, message string, fields map[string]any) {
+	// A nil receiver or nil writer must never panic; logging is best-effort
+	// and the log path is reused by the HTTP panic recovery handler, where a
+	// second panic would abort the process and drop the client connection.
+	// Guard before touching any receiver field (e.g. l.level).
+	if l == nil || l.out == nil {
+		return
+	}
 	value, ok := levels[strings.ToLower(level)]
 	if !ok || value < l.level {
 		return

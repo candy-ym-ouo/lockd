@@ -25,6 +25,9 @@ func main() {
 	}
 	var logOutput io.Writer = os.Stdout
 	if cfg.DisableLogging {
+		// DisabledWriter yields a safe no-op sink; the logger and all log
+		// call sites remain safe even when logging is disabled, so health
+		// checks and request handling are unaffected.
 		logOutput = logger.DisabledWriter()
 	}
 	log := logger.New(logOutput, cfg.LogLevel)
@@ -54,9 +57,7 @@ func main() {
 			log.Warn("shutdown", map[string]any{"error": err.Error()})
 		}
 	}()
-	if !cfg.DisableLogging {
-		log.Info("server_started", map[string]any{"addr": cfg.Addr})
-	}
+	log.Info("server_started", map[string]any{"addr": cfg.Addr})
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("server_failed", map[string]any{"error": err.Error()})
 		os.Exit(1)

@@ -24,6 +24,73 @@ func newTestServer(t *testing.T) *httptest.Server {
 	return server
 }
 
+// newDisabledLoggingServer wires the logger exactly as the daemon does under
+// -disable-logging: the output sink is logger.DisabledWriter(). Previously
+// this returned a nil *disabledWriter hidden inside a non-nil io.Writer, so
+// the first request (e.g. a health check) panicked inside request logging
+// and the recovery handler's own log.Error panicked again, dropping the
+// connection and crashing the request goroutine.
+func newDisabledLoggingServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	service := core.NewService(core.NewRegistry(nil, 100, 2*time.Second), core.NewBus(), &metrics.Metrics{}, "secret")
+	handler := New(service, logger.New(logger.DisabledWriter(), "info"), nil).Handler()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestHealthzWithDisabledLogging reproduces the reported failure: with logging
+// disabled, the first healthz request must succeed and the connection must not
+// be dropped by a nil-pointer panic in the request logger.
+func TestHealthzWithDisabledLogging(t *testing.T) {
+	server := newDisabledLoggingServer(t)
+	for i := 0; i < 3; i++ {
+		resp, err := http.Get(server.URL + "/api/v1/healthz")
+		if err != nil {
+			t.Fatalf("request %d failed: %v (connection dropped — logger panicked)", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: status %d, body %s", i, resp.StatusCode, body)
+		}
+	}
+}
+
+// TestRecoverPanicsDoesNotPanicAgainOnLog verifies the panic recovery path is
+// robust when logging itself would fail. The recovery handler calls
+// log.Error to record the panic; if that call panicked again (as it did when
+// the disabled writer was a nil pointer), the request goroutine would abort
+// without writing a response. We force a panic through a handler and assert a
+// clean 500 is returned.
+func TestRecoverPanicsDoesNotPanicAgainOnLog(t *testing.T) {
+	// A logger whose writer panics on Write simulates the historical failure
+	// where the disabled sink was a nil pointer, and also protects against any
+	// future writer that misbehaves.
+	panicWriter := &panickingWriter{}
+	log := logger.New(panicWriter, "info")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/boom", func(http.ResponseWriter, *http.Request) {
+		panic("kaboom")
+	})
+	handler := recoverPanics(log, mux)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/boom")
+	if err != nil {
+		t.Fatalf("request failed: %v (recovery path panicked a second time)", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500 after recovered panic, got %d", resp.StatusCode)
+	}
+}
+
+type panickingWriter struct{}
+
+func (*panickingWriter) Write([]byte) (int, error) { panic("writer exploded") }
+
 func TestHTTPWorkflow(t *testing.T) {
 	server := newTestServer(t)
 	postJSON(t, server.URL+"/api/v1/locks", map[string]any{
