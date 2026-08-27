@@ -33,7 +33,6 @@ type Client struct {
 	retries    int
 	mu         sync.Mutex
 	leases     map[string]*Lease
-	ctx        context.Context
 }
 
 type Lease struct {
@@ -59,7 +58,6 @@ func New(baseURL string) *Client {
 		httpClient: &http.Client{Timeout: 11 * time.Minute},
 		retries:    3,
 		leases:     make(map[string]*Lease),
-		ctx:        context.Background(),
 	}
 }
 func (c *Client) SetHTTPClient(httpClient *http.Client) {
@@ -85,7 +83,6 @@ func (c *Client) TryAcquire(ctx context.Context, namespace, name, holder string,
 	return c.Acquire(ctx, namespace, name, holder, options)
 }
 func (c *Client) Acquire(ctx context.Context, namespace, name, holder string, options AcquireOptions) (*Lease, error) {
-	ctx = c.rememberContext(ctx)
 	body := map[string]any{"holder": holder, "request_id": options.RequestID, "wait": options.Wait}
 	if options.TTL > 0 {
 		body["ttl"] = options.TTL.String()
@@ -115,7 +112,6 @@ func (c *Client) Acquire(ctx context.Context, namespace, name, holder string, op
 	return lease, nil
 }
 func (c *Client) Renew(ctx context.Context, lease *Lease) error {
-	ctx = c.currentContext()
 	if lease == nil {
 		return errors.New("lockd: nil lease")
 	}
@@ -245,17 +241,6 @@ func lockPath(namespace, name string) string {
 	return "/api/v1/locks/" + url.PathEscape(namespace) + "/" + url.PathEscape(name)
 }
 func lockKey(namespace, name string) string { return namespace + ":" + name }
-func (c *Client) rememberContext(ctx context.Context) context.Context {
-	c.mu.Lock()
-	c.ctx = ctx
-	c.mu.Unlock()
-	return ctx
-}
-func (c *Client) currentContext() context.Context {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.ctx
-}
 func effectiveTTL(requested time.Duration, expiresAt time.Time) time.Duration {
 	if requested > 0 {
 		return requested

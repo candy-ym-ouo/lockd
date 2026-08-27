@@ -15,7 +15,6 @@ type Event struct {
 }
 
 func (c *Client) Watch(ctx context.Context, namespace, name string, timeout time.Duration) (Event, error) {
-	ctx = c.rememberContext(ctx)
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}

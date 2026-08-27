@@ -7,7 +7,12 @@ import (
 )
 
 func (c *Client) StartRenewer(parent context.Context, lease *Lease, onLost func(error)) context.CancelFunc {
-	ctx, cancel := context.WithCancel(c.currentContext())
+	// Derive the renewer's lifecycle from the caller-provided parent, not from
+	// any single request's context. A request context (e.g. the one passed to
+	// Acquire) is short-lived; coupling the renewer to it would cancel the
+	// renewal loop as soon as that request finished, leaving the lease to drift
+	// idle. The returned cancel and parent cancellation both stop the loop.
+	ctx, cancel := context.WithCancel(parent)
 	go func() {
 		failures := 0
 		base := lease.TTL / 3
